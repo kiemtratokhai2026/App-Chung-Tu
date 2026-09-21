@@ -318,6 +318,36 @@ def process(zip_file, df_pl_raw, df_inv_raw, pl_filename, invoice_no, invoice_da
     wb_ci.save(ci_bytes)
     zip_file.writestr(f"{invoice_no}_COMMERCIAL_INVOICE_TAX.xlsx", ci_bytes.getvalue())
     
+    # --- PACKING LIST GENERATION ---
+    try:
+        if hasattr(pl_filename, 'seek'):
+            pl_filename.seek(0)
+        wb_pl = openpyxl.load_workbook(pl_filename)
+        
+        # Pick the correct sheet if multiple exist
+        if "Packing List" in wb_pl.sheetnames:
+            ws_pl = wb_pl["Packing List"]
+        elif "PACKING LIST" in wb_pl.sheetnames:
+            ws_pl = wb_pl["PACKING LIST"]
+        else:
+            ws_pl = wb_pl.active
+            
+        # Find and replace INV NO and DATE
+        for r in range(1, 15):
+            for c in range(1, 15):
+                val = str(ws_pl.cell(row=r, column=c).value or "").upper()
+                if "INV. NO." in val or "INV NO" in val:
+                    ws_pl.cell(row=r, column=c).value = "INV. NO." + invoice_no
+                elif "DATE:" in val:
+                    ws_pl.cell(row=r, column=c).value = "DATE: " + invoice_date
+                    
+        pl_bytes = io.BytesIO()
+        wb_pl.save(pl_bytes)
+        zip_file.writestr(f"{invoice_no}_PACKING_LIST_TAX.xlsx", pl_bytes.getvalue())
+    except Exception as e:
+        print(f"Failed to generate formatted PL: {e}")
+        pass # If it fails, we just don't have the PL (or could fallback)
+    
     # Write Contract
     contract_path = os.path.join("Templates", "TEMPLATE_CONTRACT_NORTON.docx")
     if os.path.exists(contract_path) and len(groups) > 0:
@@ -336,10 +366,8 @@ def process(zip_file, df_pl_raw, df_inv_raw, pl_filename, invoice_no, invoice_da
         item_idx = 1
         for g in groups:
             row_cells = table.add_row().cells
+            row_cells[0].merge(row_cells[3])
             row_cells[0].text = g["header"]
-            row_cells[1].text = g["header"]
-            row_cells[2].text = g["header"]
-            row_cells[3].text = g["header"]
             row_cells[4].text = f" {int(sum([i['qty'] for i in g['items']])):,.0f} "
             row_cells[5].text = ""
             row_cells[6].text = f" {int(sum([i['ctns'] for i in g['items']])):,.0f} "
