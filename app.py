@@ -1,4 +1,4 @@
-﻿import streamlit as st
+import streamlit as st
 import new_supplier_logic
 import pandas as pd
 import openpyxl
@@ -286,12 +286,6 @@ if ncc_file:
                     elif supplier == "Taizhou Norton":
                         import new_supplier_logic
                         new_supplier_logic.process(zip_file, df_pl_raw, df_inv_raw, norton_pl_file, inv_no, inv_date, exchange_rate, extract_brand, normalize_model, get_prefix, get_hs_info, None, None, float_to_currency_words, number_to_words)
-                        import pandas as pd
-                        import io
-                        pl_bytes = io.BytesIO()
-                        with pd.ExcelWriter(pl_bytes, engine='openpyxl') as writer:
-                            df_pl_raw.to_excel(writer, index=False, header=False)
-                        zip_file.writestr(f"{inv_no}_PACKING_LIST_TAX.xlsx", pl_bytes.getvalue())
                     elif supplier == "Feilizhou":
                         
                         ci_path = os.path.join("Templates", "TEMPLATE_CI.xlsx")
