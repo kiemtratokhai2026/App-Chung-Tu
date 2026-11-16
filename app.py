@@ -328,7 +328,7 @@ def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchang
         except:
             continue
             
-        if c is not None and str(c).strip() != "":
+        if c is not None and str(c).strip() != "" and str(c).strip().lower() not in ["nan", "none"]:
             last_ctn = str(c).strip()
             
         raw_items.append({
@@ -511,9 +511,18 @@ def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchang
         center_align = Alignment(horizontal="center", vertical="center")
         left_align = Alignment(horizontal="left", vertical="center")
         
+        def merge_carton_group(start_r, end_r):
+            if end_r > start_r:
+                for mc in [1, 7, 8, 9, 10, 11]:
+                    ws_pl.merge_cells(start_row=start_r, start_column=mc, end_row=end_r, end_column=mc)
+                    apply_border_to_merged_cell(ws_pl, start_r, mc, end_r, mc)
+                    for r in range(start_r, end_r + 1):
+                        ws_pl.cell(row=r, column=mc).alignment = center_align
+
         row_idx = 12
         current_brand = None
         prev_cno = None
+        group_start_row = 0
         
         grand_qty_pl = 0
         grand_nw_pl = 0
@@ -521,6 +530,11 @@ def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchang
         
         for g in groups:
             if g["brand"] != current_brand:
+                if group_start_row > 0 and (row_idx - 1) > group_start_row:
+                    merge_carton_group(group_start_row, row_idx - 1)
+                group_start_row = 0
+                prev_cno = None
+
                 current_brand = g["brand"]
                 display_brand = current_brand
                 ws_pl.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=11)
@@ -531,9 +545,13 @@ def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchang
                 for c in range(1, 12):
                     ws_pl.cell(row=row_idx, column=c).border = thin_border
                 row_idx += 1
-                prev_cno = None
 
             is_same_carton = (prev_cno is not None and g["cno"] == prev_cno)
+            if not is_same_carton:
+                if group_start_row > 0 and (row_idx - 1) > group_start_row:
+                    merge_carton_group(group_start_row, row_idx - 1)
+                group_start_row = row_idx
+
             pcs_ctn = int(g["pcs"]) if float(g["pcs"]).is_integer() else round(g["pcs"], 2)
             
             ws_pl.cell(row=row_idx, column=1).value = None if is_same_carton else g["cno"]
@@ -552,11 +570,8 @@ def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchang
                 grand_nw_pl += g["tnw"]
                 grand_gw_pl += g["tgw"]
             else:
-                ws_pl.cell(row=row_idx, column=7).value = None
-                ws_pl.cell(row=row_idx, column=8).value = None
-                ws_pl.cell(row=row_idx, column=9).value = None
-                ws_pl.cell(row=row_idx, column=10).value = None
-                ws_pl.cell(row=row_idx, column=11).value = None
+                for c in range(7, 12):
+                    ws_pl.cell(row=row_idx, column=c).value = None
                 
             grand_qty_pl += g["qty"]
             
@@ -568,28 +583,8 @@ def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchang
             prev_cno = g["cno"]
             row_idx += 1
 
-        start_merge_row = 12
-        while start_merge_row <= row_idx - 1:
-            val = ws_pl.cell(row=start_merge_row, column=1).value
-            if val is None or str(val).startswith("RUBBER BELT"):
-                start_merge_row += 1
-                continue
-                
-            end_merge_row = start_merge_row
-            while end_merge_row + 1 <= row_idx - 1:
-                next_val = ws_pl.cell(row=end_merge_row + 1, column=1).value
-                if next_val == val:
-                    end_merge_row += 1
-                else:
-                    break
-                    
-            if end_merge_row > start_merge_row:
-                for merge_col in [1, 7, 8, 9, 10, 11]:
-                    ws_pl.merge_cells(start_row=start_merge_row, start_column=merge_col, end_row=end_merge_row, end_column=merge_col)
-                    apply_border_to_merged_cell(ws_pl, start_merge_row, merge_col, end_merge_row, merge_col)
-                    ws_pl.cell(row=start_merge_row, column=merge_col).alignment = center_align
-                    
-            start_merge_row = end_merge_row + 1
+        if group_start_row > 0 and (row_idx - 1) > group_start_row:
+            merge_carton_group(group_start_row, row_idx - 1)
 
         # TOTAL ROW
         ws_pl.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=4)
