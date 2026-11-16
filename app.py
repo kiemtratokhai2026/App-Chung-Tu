@@ -294,7 +294,115 @@ def load_excel_files(files):
         except Exception as e:
             return None, None, None, None, None, f"Lỗi đọc file: {e}"
 
-def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchange_rate, model_cartons, pl_groups):
+def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchange_rate, model_cartons=None, pl_groups=None):
+    # 1. Parse PL rows
+    raw_items = []
+    last_ctn = ""
+    cur_brd = "TAKA PRO"
+    
+    for idx, row in df_pl_raw.iterrows():
+        c = row[0] if len(row) > 0 and pd.notna(row[0]) else None
+        m = row[1] if len(row) > 1 and pd.notna(row[1]) else None
+        inch = row[2] if len(row) > 2 and pd.notna(row[2]) else None
+        q = row[3] if len(row) > 3 and pd.notna(row[3]) else None
+        nw = row[4] if len(row) > 4 and pd.notna(row[4]) else None
+        gw = row[5] if len(row) > 5 and pd.notna(row[5]) else None
+        
+        row_vals = [row[col] for col in range(min(7, len(row))) if pd.notna(row[col])]
+        row_str = " ".join([str(x).upper() for x in row_vals])
+        
+        # Check brand header
+        b = extract_brand(row_str)
+        if b:
+            cur_brd = "TAKA PRO" if b == "TAKAPRO" else b
+            
+        if not m or str(m).strip().upper() in ["TOTAL", "ITEM"]:
+            continue
+            
+        sm = str(m).strip()
+        if (not inch or str(inch).strip() == "") and (not q or str(q).strip() == "") and "-" not in sm:
+            continue
+            
+        try:
+            qty_num = float(q)
+        except:
+            continue
+            
+        if c is not None and str(c).strip() != "":
+            last_ctn = str(c).strip()
+            
+        raw_items.append({
+            "ctn": last_ctn,
+            "model": sm,
+            "inch": float(inch) if inch and str(inch).replace('.', '', 1).isdigit() else 0.0,
+            "qty": qty_num,
+            "nw": float(nw) if nw and str(nw).replace('.', '', 1).isdigit() else 0.0,
+            "gw": float(gw) if gw and str(gw).replace('.', '', 1).isdigit() else 0.0,
+            "brand": cur_brd
+        })
+        
+    # 2. Group consecutive identical (brand, model, qty)
+    n_raw = len(raw_items)
+    groups = []
+    i = 0
+    while i < n_raw:
+        j = i + 1
+        while j < n_raw and raw_items[j]["model"] == raw_items[i]["model"] and raw_items[j]["qty"] == raw_items[i]["qty"] and raw_items[j]["brand"] == raw_items[i]["brand"]:
+            j += 1
+        cnt = j - i
+        start_c = raw_items[i]["ctn"]
+        end_c = raw_items[j-1]["ctn"]
+        c_str = start_c if (cnt == 1 or start_c == end_c) else f"{start_c}-{end_c}"
+        groups.append({
+            "cno": c_str,
+            "start_ctn": start_c,
+            "end_ctn": end_c,
+            "model": raw_items[i]["model"],
+            "inch": raw_items[i]["inch"],
+            "brand": raw_items[i]["brand"],
+            "pcs": raw_items[i]["qty"],
+            "ctns": cnt,
+            "qty": raw_items[i]["qty"] * cnt,
+            "nw": raw_items[i]["nw"],
+            "gw": raw_items[i]["gw"],
+            "tnw": round(raw_items[i]["nw"] * cnt, 3),
+            "tgw": round(raw_items[i]["gw"] * cnt, 3)
+        })
+        i = j
+        
+    # 3. Model dictionaries
+    dPCS_model = {}
+    dCtns_model = {}
+    dQty_model = {}
+    
+    dPCS_brand = {}
+    dCtns_brand = {}
+    dQty_brand = {}
+    
+    for g in groups:
+        k_full = f"{g['brand']}_{normalize_model(g['model'])}"
+        k_short = normalize_model(g['model'])
+        
+        if k_full not in dPCS_brand:
+            dPCS_brand[k_full] = g["pcs"]
+            dCtns_brand[k_full] = g["ctns"]
+            dQty_brand[k_full] = g["qty"]
+        else:
+            dCtns_brand[k_full] += g["ctns"]
+            dQty_brand[k_full] += g["qty"]
+            
+        if k_short not in dPCS_model:
+            dPCS_model[k_short] = g["pcs"]
+            dCtns_model[k_short] = g["ctns"]
+            dQty_model[k_short] = g["qty"]
+        else:
+            dCtns_model[k_short] += g["ctns"]
+            dQty_model[k_short] += g["qty"]
+
+    unique_ctns = set(x["ctn"] for x in raw_items if x["ctn"] and str(x["ctn"]).strip().isdigit())
+    grand_ctns = len(unique_ctns) if unique_ctns else len(set(x["ctn"] for x in raw_items if x["ctn"]))
+
+    # 4. CI TAX
     ci_path = os.path.join("Templates", "TEMPLATE_CI.xlsx")
     if os.path.exists(ci_path):
         wb_ci = openpyxl.load_workbook(ci_path)
@@ -302,115 +410,59 @@ def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchang
         ws_ci["J3"] = f"INVOICE NO.: {inv_no}"
         ws_ci["J4"] = f"DATE: {inv_date}"
         
-        items_flat = []
-        current_brand = "UNKNOWN"
-        current_ctns = []
-        for idx, row in df_pl_raw.iterrows():
-            row_str = " ".join([str(x).upper() for x in row.values if pd.notna(x)])
-            b = extract_brand(row_str)
-            if b: current_brand = b
-            col_a = str(row[0]).strip().upper()
-            col_b = str(row[1]).strip().upper()
-            if pd.isna(row[1]) or col_b in ["NAN", "NONE", ""]: continue
-            if col_b.startswith("RUBBER BELT"): continue
-            if re.match(r"^\d+$", col_a): current_ctns = [int(col_a)]
-            elif re.match(r"^\d+-\d+$", col_a):
-                parts = col_a.split("-")
-                current_ctns = list(range(int(parts[0]), int(parts[1])+1))
-            elif current_ctns and col_a in ["NAN", "NONE", ""]: pass
-            else: continue
-            num_c = len(current_ctns)
-            qty_val = float(row[3]) / num_c if len(row) > 3 and pd.notna(row[3]) else 0
-            for c in current_ctns:
-                items_flat.append({"ctn": c, "brand": current_brand, "model": col_b, "qty": qty_val})
-
-        df_items_ci = pd.DataFrame(items_flat)
-        assigned_ctns_ci = set()
-        if len(df_items_ci) > 0:
-            for idx, row in df_items_ci.iterrows():
-                c = row["ctn"]
-                if c not in assigned_ctns_ci:
-                    df_items_ci.at[idx, "assigned_ctns"] = 1
-                    assigned_ctns_ci.add(c)
-                else:
-                    df_items_ci.at[idx, "assigned_ctns"] = 0
-
-        df_items_ci["norm_model"] = df_items_ci["model"].apply(normalize_model)
-        grouped = df_items_ci.groupby(["brand", "norm_model"]).agg({"qty": "sum", "assigned_ctns": "sum"}).reset_index()
-        model_data = {}
-        for _, r in grouped.iterrows():
-            key = r["brand"] + "_" + r["norm_model"]
-            model_data[key] = {"qty": r["qty"], "ctns": r["assigned_ctns"]}
-
         prices = {}
         for r in range(13, ws_ci.max_row):
-            m = str(ws_ci.cell(row=r, column=3).value).strip()
-            p = str(ws_ci.cell(row=r, column=9).value)
+            m = str(ws_ci.cell(row=r, column=3).value or "").strip()
+            p = str(ws_ci.cell(row=r, column=9).value or "").strip()
+            desc = str(ws_ci.cell(row=r, column=2).value or "").strip()
+            b = extract_brand(desc)
+            brd_name = "TAKA PRO" if b == "TAKAPRO" else (b or "TAKA PRO")
             if m and m not in ["NAN", "NONE", ""] and not m.startswith("="):
-                row_str = " ".join([str(ws_ci.cell(row=r, column=c).value).upper() for c in range(1, 10)])
-                b = extract_brand(row_str)
-                if b:
-                    try: prices[f"{b}_{normalize_model(m)}"] = float(p)
-                    except: pass
-                    
-        def number_to_words(n):
-            units = ["", "ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN", "EIGHT", "NINE", "TEN",
-                     "ELEVEN", "TWELVE", "THIRTEEN", "FOURTEEN", "FIFTEEN", "SIXTEEN", "SEVENTEEN", "EIGHTEEN", "NINETEEN"]
-            tens = ["", "", "TWENTY", "THIRTY", "FORTY", "FIFTY", "SIXTY", "SEVENTY", "EIGHTY", "NINETY"]
-            n = int(n)
-            if n == 0: return "ZERO"
-            if n < 20: return units[n]
-            if n < 100: return tens[n // 10] + (" " + units[n % 10] if (n % 10 != 0) else "")
-            if n < 1000: return units[n // 100] + " HUNDRED" + (" AND " + number_to_words(n % 100) if (n % 100 != 0) else "")
-            if n < 1000000: return number_to_words(n // 1000) + " THOUSAND" + (" " + number_to_words(n % 1000) if (n % 1000 != 0) else "")
-            return str(n)
-
-        def float_to_currency_words(amt):
-            amt = round(amt, 2)
-            dollars = int(amt)
-            cents = int(round((amt - dollars) * 100))
-            d_words = number_to_words(dollars)
-            c_words = number_to_words(cents)
-            res = f"{d_words} DOLLAR{'S' if dollars != 1 else ''}"
-            if cents > 0: res += f" AND {c_words} CENT{'S' if cents != 1 else ''}"
-            return res + " ONLY."
+                norm_m = normalize_model(m)
+                try:
+                    price_val = float(p)
+                    prices[f"{brd_name}_{norm_m}"] = price_val
+                    if norm_m not in prices:
+                        prices[norm_m] = price_val
+                except:
+                    pass
 
         rows_to_delete_ci = []
         grand_qty_ci = 0
-        grand_ctns_ci = 0
         grand_amt_ci = 0
         total_row_idx = -1
         
         for r in range(13, ws_ci.max_row + 1):
-            col_a_val = str(ws_ci.cell(row=r, column=1).value).strip().upper()
+            col_a_val = str(ws_ci.cell(row=r, column=1).value or "").strip().upper()
             if col_a_val == "TOTAL":
                 total_row_idx = r
                 break
             
             if col_a_val.isdigit():
-                m = str(ws_ci.cell(row=r, column=3).value).strip()
-                row_str = " ".join([str(ws_ci.cell(row=r, column=c).value).upper() for c in range(1, 10)])
-                b = extract_brand(row_str)
-                key = f"{b}_{normalize_model(m)}"
+                m = str(ws_ci.cell(row=r, column=3).value or "").strip()
+                desc = str(ws_ci.cell(row=r, column=2).value or "").strip()
+                b = extract_brand(desc)
+                brd_name = "TAKA PRO" if b == "TAKAPRO" else (b or "TAKA PRO")
+                norm_m = normalize_model(m)
+                key_full = f"{brd_name}_{norm_m}"
                 
-                qty = model_data.get(key, {}).get("qty", 0)
-                ctns = model_data.get(key, {}).get("ctns", 0)
+                qty = dQty_brand.get(key_full, dQty_model.get(norm_m, 0))
+                pcs = dPCS_model.get(norm_m, dPCS_brand.get(key_full, 0))
+                ctns = dCtns_model.get(norm_m, dCtns_brand.get(key_full, 0))
                 
                 if qty == 0:
                     rows_to_delete_ci.append(r)
                 else:
-                    price = prices.get(key, 0)
-                    amt = qty * price
+                    price = prices.get(key_full, prices.get(norm_m, 0))
+                    amt = round(qty * price, 2)
+                    
                     ws_ci.cell(row=r, column=6).value = qty
-                    if ctns > 0 and qty % ctns == 0:
-                        ws_ci.cell(row=r, column=7).value = int(qty/ctns)
-                    else:
-                        ws_ci.cell(row=r, column=7).value = ""
-                    ws_ci.cell(row=r, column=8).value = ctns
+                    ws_ci.cell(row=r, column=7).value = int(pcs) if float(pcs).is_integer() else pcs
+                    ws_ci.cell(row=r, column=8).value = int(ctns)
+                    ws_ci.cell(row=r, column=9).value = price
                     ws_ci.cell(row=r, column=10).value = amt
                     
                     grand_qty_ci += qty
-                    grand_ctns_ci += ctns
                     grand_amt_ci += amt
 
         for r in reversed(rows_to_delete_ci):
@@ -419,18 +471,18 @@ def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchang
             
         if total_row_idx != -1:
             ws_ci.cell(row=total_row_idx, column=6).value = grand_qty_ci
-            ws_ci.cell(row=total_row_idx, column=8).value = grand_ctns_ci
+            ws_ci.cell(row=total_row_idx, column=8).value = grand_ctns
             ws_ci.cell(row=total_row_idx, column=10).value = round(grand_amt_ci, 2)
             
             for check_r in range(total_row_idx, total_row_idx + 5):
-                val = str(ws_ci.cell(row=check_r, column=1).value).strip()
+                val = str(ws_ci.cell(row=check_r, column=1).value or "").strip()
                 if "SAY" in val:
                     ws_ci.cell(row=check_r, column=1).value = "SAY IN WORD: " + float_to_currency_words(grand_amt_ci)
                     break
                     
         item_idx = 1
         for r in range(13, ws_ci.max_row + 1):
-            val = str(ws_ci.cell(row=r, column=1).value).strip()
+            val = str(ws_ci.cell(row=r, column=1).value or "").strip()
             if val == "TOTAL": break
             if val.isdigit() or val != "None":
                 if ws_ci.cell(row=r, column=3).value:
@@ -440,7 +492,8 @@ def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchang
         ci_bytes = io.BytesIO()
         wb_ci.save(ci_bytes)
         zip_file.writestr(f"{inv_no}_COMMERCIAL_INVOICE_TAX.xlsx", ci_bytes.getvalue())
-        
+
+    # 5. PL TAX
     pl_path = os.path.join("Templates", "TEMPLATE_PL.xlsx")
     if os.path.exists(pl_path):
         wb_pl = openpyxl.load_workbook(pl_path)
@@ -450,28 +503,26 @@ def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchang
         
         ws_pl.delete_rows(11, ws_pl.max_row - 10)
         
-        # Fix Ghost Merge Ranges
-        ranges_to_remove = []
-        for rng in ws_pl.merged_cells.ranges:
-            if rng.min_row >= 11:
-                ranges_to_remove.append(rng)
+        ranges_to_remove = [rng for rng in ws_pl.merged_cells.ranges if rng.min_row >= 11]
         for rng in ranges_to_remove:
             ws_pl.merged_cells.remove(rng)
-        
+            
         thin_border = Border(left=Side(style="thin"), right=Side(style="thin"), top=Side(style="thin"), bottom=Side(style="thin"))
         center_align = Alignment(horizontal="center", vertical="center")
         left_align = Alignment(horizontal="left", vertical="center")
         
         row_idx = 11
         current_brand = None
-        pl_assigned_ctns = set()
+        prev_cno = None
         
-        for g in pl_groups:
+        grand_qty_pl = 0
+        grand_nw_pl = 0
+        grand_gw_pl = 0
+        
+        for g in groups:
             if g["brand"] != current_brand:
                 current_brand = g["brand"]
                 display_brand = current_brand
-                if current_brand == "TAKAPRO": display_brand = "TAKA PRO"
-                
                 ws_pl.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=11)
                 cell = ws_pl.cell(row=row_idx, column=1)
                 cell.value = f"RUBBER BELT (V-RIBBED) {display_brand}"
@@ -480,52 +531,43 @@ def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchang
                 for c in range(1, 12):
                     ws_pl.cell(row=row_idx, column=c).border = thin_border
                 row_idx += 1
-                
-            ctn_str = str(int(g["start_ctn"])) if g["start_ctn"] == g["end_ctn"] else f"{int(g['start_ctn'])}-{int(g['end_ctn'])}"
+                prev_cno = None
+
+            is_same_carton = (prev_cno is not None and g["cno"] == prev_cno)
+            pcs_ctn = int(g["pcs"]) if float(g["pcs"]).is_integer() else round(g["pcs"], 2)
             
-            ctns_val = 0
-            for c in g["cartons_set"]:
-                if c not in pl_assigned_ctns:
-                    ctns_val += 1
-                    pl_assigned_ctns.add(c)
-                    
-            num_cartons = len(g["cartons_set"])
-            pcs_val = g["total_qty"] / num_cartons if num_cartons > 0 else 0
-            pcs_ctn = int(pcs_val) if float(pcs_val).is_integer() else round(pcs_val, 2)
-                
-            display_brand2 = current_brand
-            if current_brand == "TAKAPRO": display_brand2 = "TAKA PRO"
-                
-            ws_pl.cell(row=row_idx, column=1).value = ctn_str
-            ws_pl.cell(row=row_idx, column=2).value = f"Rubber Belt (V-Ribbed) {display_brand2} {g['model']}"
+            ws_pl.cell(row=row_idx, column=1).value = None if is_same_carton else g["cno"]
+            ws_pl.cell(row=row_idx, column=2).value = f"Rubber Belt (V-Ribbed) {current_brand} {g['model']}"
             ws_pl.cell(row=row_idx, column=3).value = g["model"]
-            ws_pl.cell(row=row_idx, column=4).value = g["inch"]
-            ws_pl.cell(row=row_idx, column=5).value = g["total_qty"]
+            ws_pl.cell(row=row_idx, column=4).value = int(g["inch"]) if float(g["inch"]).is_integer() else g["inch"]
+            ws_pl.cell(row=row_idx, column=5).value = g["qty"]
             ws_pl.cell(row=row_idx, column=6).value = pcs_ctn
             
-            # ONLY write CTNS if ctns_val > 0, else leave blank
-            if ctns_val > 0: ws_pl.cell(row=row_idx, column=7).value = ctns_val
-            
-            nw_val = round(g["total_nw"] / ctns_val, 2) if ctns_val > 0 else 0
-            gw_val = round(g["total_gw"] / ctns_val, 2) if ctns_val > 0 else 0
-            
-            # ONLY write NW and GW if nw_val > 0, else leave blank
-            if nw_val > 0: ws_pl.cell(row=row_idx, column=8).value = nw_val
-            if gw_val > 0: ws_pl.cell(row=row_idx, column=9).value = gw_val
-            
-            tot_nw = round(g["total_nw"], 2)
-            tot_gw = round(g["total_gw"], 2)
-            if tot_nw > 0: ws_pl.cell(row=row_idx, column=10).value = tot_nw
-            if tot_gw > 0: ws_pl.cell(row=row_idx, column=11).value = tot_gw
+            if not is_same_carton:
+                ws_pl.cell(row=row_idx, column=7).value = g["ctns"]
+                if g["nw"] > 0: ws_pl.cell(row=row_idx, column=8).value = g["nw"]
+                if g["gw"] > 0: ws_pl.cell(row=row_idx, column=9).value = g["gw"]
+                if g["tnw"] > 0: ws_pl.cell(row=row_idx, column=10).value = round(g["tnw"], 2)
+                if g["tgw"] > 0: ws_pl.cell(row=row_idx, column=11).value = round(g["tgw"], 2)
+                grand_nw_pl += g["tnw"]
+                grand_gw_pl += g["tgw"]
+            else:
+                ws_pl.cell(row=row_idx, column=7).value = None
+                ws_pl.cell(row=row_idx, column=8).value = None
+                ws_pl.cell(row=row_idx, column=9).value = None
+                ws_pl.cell(row=row_idx, column=10).value = None
+                ws_pl.cell(row=row_idx, column=11).value = None
+                
+            grand_qty_pl += g["qty"]
             
             for c in range(1, 12):
                 cell = ws_pl.cell(row=row_idx, column=c)
                 cell.border = thin_border
                 cell.alignment = center_align
                 
+            prev_cno = g["cno"]
             row_idx += 1
-            
-        # Merge logic
+
         start_merge_row = 11
         while start_merge_row <= row_idx - 1:
             val = ws_pl.cell(row=start_merge_row, column=1).value
@@ -557,10 +599,10 @@ def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchang
         cell.alignment = center_align
         fill = PatternFill(start_color="C00000", end_color="C00000", fill_type="solid")
         
-        ws_pl.cell(row=row_idx, column=5).value = sum(g["total_qty"] for g in pl_groups)
-        ws_pl.cell(row=row_idx, column=7).value = len(pl_assigned_ctns)
-        ws_pl.cell(row=row_idx, column=10).value = sum(g["total_nw"] for g in pl_groups)
-        ws_pl.cell(row=row_idx, column=11).value = sum(g["total_gw"] for g in pl_groups)
+        ws_pl.cell(row=row_idx, column=5).value = grand_qty_pl
+        ws_pl.cell(row=row_idx, column=7).value = grand_ctns
+        ws_pl.cell(row=row_idx, column=10).value = round(grand_nw_pl, 0)
+        ws_pl.cell(row=row_idx, column=11).value = round(grand_gw_pl, 0)
         
         for c in range(1, 12):
             cell = ws_pl.cell(row=row_idx, column=c)
@@ -568,10 +610,20 @@ def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchang
             cell.fill = fill
             cell.font = Font(bold=True, color="FFFFFF")
             
+        row_idx += 2
+        ws_pl.cell(row=row_idx, column=1).value = "SHIPPING MARKS:"
+        ws_pl.cell(row=row_idx, column=3).value = "TAKA PRO"
+        ws_pl.cell(row=row_idx+1, column=3).value = "TAKA"
+        ws_pl.cell(row=row_idx+3, column=1).value = f"TOTAL: {grand_qty_pl:,.0f} PCS / {grand_ctns} CARTONS"
+        ws_pl.cell(row=row_idx+4, column=1).value = f"G.W.: {round(grand_gw_pl, 3):,.3f} KGS"
+        ws_pl.cell(row=row_idx+5, column=1).value = f"N.W.: {round(grand_nw_pl, 3):,.3f} KGS"
+        ws_pl.cell(row=row_idx+6, column=1).value = "MEAS.: __________ CBM"
+        
         pl_bytes = io.BytesIO()
         wb_pl.save(pl_bytes)
         zip_file.writestr(f"{inv_no}_PACKING_LIST_TAX.xlsx", pl_bytes.getvalue())
-            
+
+    # 6. DRAFT FE
     fe_path = os.path.join("Templates", "TEMPLATE_FE.xlsx")
     if os.path.exists(fe_path):
         wb_fe = openpyxl.load_workbook(fe_path)
@@ -583,155 +635,80 @@ def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchang
                 if type(cell).__name__ != 'MergedCell':
                     cell.value = None
 
-        def number_to_words(n):
-            units = ["", "ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN", "EIGHT", "NINE", "TEN",
-                     "ELEVEN", "TWELVE", "THIRTEEN", "FOURTEEN", "FIFTEEN", "SIXTEEN", "SEVENTEEN", "EIGHTEEN", "NINETEEN"]
-            tens = ["", "", "TWENTY", "THIRTY", "FORTY", "FIFTY", "SIXTY", "SEVENTY", "EIGHTY", "NINETY"]
-            n = int(n)
-            if n == 0: return "ZERO"
-            if n < 20: return units[n]
-            if n < 100: return tens[n // 10] + (" " + units[n % 10] if (n % 10 != 0) else "")
-            if n < 1000:
-                return units[n // 100] + " HUNDRED" + (" AND " + number_to_words(n % 100) if (n % 100 != 0) else "")
-            if n < 1000000:
-                return number_to_words(n // 1000) + " THOUSAND" + (" " + number_to_words(n % 1000) if (n % 1000 != 0) else "")
-            return str(n)
-
-        items_flat = []
-        current_brand = "UNKNOWN"
-        current_ctns = []
-        for idx, row in df_pl_raw.iterrows():
-            row_str = " ".join([str(x).upper() for x in row.values if pd.notna(x)])
-            b = extract_brand(row_str)
-            if b: current_brand = b
-                
-            col_a = str(row[0]).strip().upper()
-            col_b = str(row[1]).strip().upper()
+        fe_groups_dict = {}
+        for g in groups:
+            hs, sdesc = get_hs_info(g["inch"])
+            brd = g["brand"]
+            k = (brd, hs, sdesc)
+            if k not in fe_groups_dict:
+                fe_groups_dict[k] = {"ctns": 0, "qty": 0, "prefixes": set()}
+            fe_groups_dict[k]["ctns"] += g["ctns"]
+            fe_groups_dict[k]["qty"] += g["qty"]
+            fe_groups_dict[k]["prefixes"].add(get_prefix(g["model"]))
             
-            if pd.isna(row[1]) or col_b in ["NAN", "NONE", ""]: continue
-            if col_b.startswith("RUBBER BELT"): continue
+        brand_priority = {"TAKA PRO": 1, "TAKA": 2, "YAMATACHI": 3}
+        sorted_fe_keys = sorted(
+            fe_groups_dict.keys(),
+            key=lambda k: (brand_priority.get(k[0], 99), k[1], k[2])
+        )
+        
+        row_idx = 23
+        item_num = 1
+        total_fe_qty = 0
+        
+        for k in sorted_fe_keys:
+            brd, hs_code, size_desc = k
+            g_info = fe_groups_dict[k]
+            total_cartons = int(g_info["ctns"])
+            total_qty = int(g_info["qty"])
+            total_fe_qty += total_qty
+            prefixes = ", ".join(sorted(g_info["prefixes"]))
             
-            if re.match(r"^\d+$", col_a): current_ctns = [int(col_a)]
-            elif re.match(r"^\d+-\d+$", col_a):
-                parts = col_a.split("-")
-                current_ctns = list(range(int(parts[0]), int(parts[1])+1))
-            elif current_ctns and col_a in ["NAN", "NONE", ""]: pass
-            else: continue
+            ctn_words = number_to_words(total_cartons)
+            desc = f"{ctn_words} ({total_cartons}) CTNS OF RUBBER BELT (V-RIBBED) {brd} {prefixes} {size_desc}"
             
-            num_c = len(current_ctns)
-            inch_val = float(row[2]) if len(row) > 2 and pd.notna(row[2]) else 0
-            qty_val = float(row[3]) / num_c if len(row) > 3 and pd.notna(row[3]) else 0
+            cell1 = ws_fe.cell(row=row_idx, column=1)
+            if type(cell1).__name__ != 'MergedCell': cell1.value = item_num
             
-            for c in current_ctns:
-                items_flat.append({
-                    "ctn": c,
-                    "brand": current_brand,
-                    "model": col_b,
-                    "inch": inch_val,
-                    "qty": qty_val
-                })
-
-        df_items = pd.DataFrame(items_flat)
-        assigned_ctns = set()
-        if len(df_items) > 0:
-            for idx, row in df_items.iterrows():
-                c = row["ctn"]
-                if c not in assigned_ctns:
-                    df_items.at[idx, "assigned_ctns"] = 1
-                    assigned_ctns.add(c)
-                else:
-                    df_items.at[idx, "assigned_ctns"] = 0
-
-            def get_prefix(model):
-                if "-" in model:
-                    parts = model.split("-")
-                    if len(parts[1]) > 0:
-                        return parts[0] + "-" + parts[1][0]
-                return model
-
-            df_items["prefix"] = df_items["model"].apply(get_prefix)
-
-            def get_hs_info(inch):
-                cm = inch * 2.54
-                if cm <= 180: return "401032", "FROM 60CM TO 180CM"
-                elif cm <= 240: return "401034", "FROM 180CM TO 240CM"
-                else: return "401039", "OVER 240CM"
-
-            df_items[["hs_code", "size_desc"]] = df_items.apply(lambda r: pd.Series(get_hs_info(r["inch"])), axis=1)
-
-            brand_order = {"TAKAPRO": 1, "TAKA": 2, "YAMATACHI": 3}
-            df_items['brand_order'] = df_items['brand'].map(brand_order).fillna(99)
+            if item_num == 1:
+                cell2 = ws_fe.cell(row=row_idx, column=2)
+                if type(cell2).__name__ != 'MergedCell': cell2.value = "TAKA\nYAMATACHI"
+                cell8 = ws_fe.cell(row=row_idx, column=8)
+                if type(cell8).__name__ != 'MergedCell': cell8.value = f"{inv_no}\n{inv_date}"
+                
+            cell3 = ws_fe.cell(row=row_idx, column=3)
+            if type(cell3).__name__ != 'MergedCell': cell3.value = desc
             
-            fe_groups = df_items.groupby(["brand_order", "brand", "hs_code", "size_desc"])
-
-            row_idx = 23
-            item_num = 1
-            total_fe_qty = 0
+            cell5 = ws_fe.cell(row=row_idx, column=5)
+            if type(cell5).__name__ != 'MergedCell': cell5.value = '\n     “PE”'
             
-            for name, group in fe_groups:
-                _, brand, hs_code, size_desc = name
-                prefixes = ", ".join(sorted(group["prefix"].unique()))
-                total_cartons = int(group["assigned_ctns"].sum())
-                total_qty = int(group["qty"].sum())
-                total_fe_qty += total_qty
-                
-                display_brand = "TAKA PRO" if brand == "TAKAPRO" else brand
-                
-                ctn_words = number_to_words(total_cartons)
-                desc = f"{ctn_words} ({total_cartons}) CTNS OF RUBBER BELT (V-RIBBED) {display_brand} {prefixes} {size_desc}"
-                
-                cell1 = ws_fe.cell(row=row_idx, column=1)
-                if type(cell1).__name__ != 'MergedCell': cell1.value = item_num
-                
-                if item_num == 1:
-                    cell2 = ws_fe.cell(row=row_idx, column=2)
-                    if type(cell2).__name__ != 'MergedCell': cell2.value = "TAKA\nYAMATACHI"
-                    cell8 = ws_fe.cell(row=row_idx, column=8)
-                    if type(cell8).__name__ != 'MergedCell': cell8.value = f"{inv_no}\n{inv_date}"
-                    
-                cell3 = ws_fe.cell(row=row_idx, column=3)
-                if type(cell3).__name__ != 'MergedCell': cell3.value = desc
-                
-                cell5 = ws_fe.cell(row=row_idx, column=5)
-                if type(cell5).__name__ != 'MergedCell': cell5.value = '\n     “PE”'
-                
-                cell6 = ws_fe.cell(row=row_idx, column=6)
-                if type(cell6).__name__ != 'MergedCell': cell6.value = total_qty
-                
-                row_idx += 1
-                
-                if item_num == 1:
-                    cell2_2 = ws_fe.cell(row=row_idx, column=2)
-                    if type(cell2_2).__name__ != 'MergedCell': cell2_2.value = "C/NO"
-                    
-                cell3_2 = ws_fe.cell(row=row_idx, column=3)
-                if type(cell3_2).__name__ != 'MergedCell': cell3_2.value = f"HS CODE: {hs_code}"
-                
-                if row_idx > 40:
-                    for col in range(1, 10):
-                        c_source = ws_fe.cell(row=24, column=col)
-                        c_target = ws_fe.cell(row=row_idx, column=col)
-                        if type(c_target).__name__ != 'MergedCell' and type(c_source).__name__ != 'MergedCell':
-                            if c_source.has_style:
-                                c_target.font = openpyxl.styles.Font(name=c_source.font.name, size=c_source.font.size, bold=c_source.font.bold)
-                                c_target.border = openpyxl.styles.Border(left=c_source.border.left, right=c_source.border.right, top=c_source.border.top, bottom=c_source.border.bottom)
-                                c_target.fill = openpyxl.styles.PatternFill(fill_type=c_source.fill.fill_type, fgColor=c_source.fill.fgColor, bgColor=c_source.fill.bgColor)
-                                c_target.alignment = openpyxl.styles.Alignment(horizontal=c_source.alignment.horizontal, vertical=c_source.alignment.vertical, wrap_text=c_source.alignment.wrap_text)
-                
-                row_idx += 1
-                item_num += 1
-
-            cell_tot = ws_fe.cell(row=row_idx, column=3)
-            if type(cell_tot).__name__ != 'MergedCell': cell_tot.value = f"TOTAL QUANTITIES: {total_fe_qty:,.0f} PCS"
-            cell_qty = ws_fe.cell(row=row_idx, column=6)
-            if type(cell_qty).__name__ != 'MergedCell': cell_qty.value = total_fe_qty
-            cell_pe = ws_fe.cell(row=row_idx, column=5)
-            if type(cell_pe).__name__ != 'MergedCell': cell_pe.value = '\n     “PE”'
+            cell6 = ws_fe.cell(row=row_idx, column=6)
+            if type(cell6).__name__ != 'MergedCell': cell6.value = total_qty
             
+            row_idx += 1
+            
+            if item_num == 1:
+                cell2_2 = ws_fe.cell(row=row_idx, column=2)
+                if type(cell2_2).__name__ != 'MergedCell': cell2_2.value = "C/NO"
+                
+            cell3_2 = ws_fe.cell(row=row_idx, column=3)
+            if type(cell3_2).__name__ != 'MergedCell': cell3_2.value = f"HS CODE: {hs_code}"
+            
+            row_idx += 1
+            item_num += 1
+
+        cell_tot = ws_fe.cell(row=row_idx, column=3)
+        if type(cell_tot).__name__ != 'MergedCell': cell_tot.value = f"TOTAL QUANTITIES: {total_fe_qty:,.0f} PCS"
+        cell_qty = ws_fe.cell(row=row_idx, column=6)
+        if type(cell_qty).__name__ != 'MergedCell': cell_qty.value = total_fe_qty
+        cell_pe = ws_fe.cell(row=row_idx, column=5)
+        if type(cell_pe).__name__ != 'MergedCell': cell_pe.value = '\n     “PE”'
+        
         fe_bytes = io.BytesIO()
         wb_fe.save(fe_bytes)
         zip_file.writestr(f"DRAFT_FE_{inv_no}_TAX.xlsx", fe_bytes.getvalue())
-            
+
+    # 7. CONTRACT
     contract_path = os.path.join("Templates", "TEMPLATE_CONTRACT.docx")
     if os.path.exists(contract_path):
         doc = Document(contract_path)
@@ -746,7 +723,7 @@ def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchang
         accum_ctns = 0
         
         grand_qty = 0
-        grand_ctns = 0
+        grand_ctns_contract = 0
         grand_amt = 0
         
         for i, row in enumerate(table.rows[1:]):
@@ -758,7 +735,7 @@ def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchang
                         summary_row.cells[4].text = f" {accum_qty:,.0f} "
                         summary_row.cells[6].text = f" {accum_ctns:,.0f} "
                 row.cells[4].text = f" {grand_qty:,.0f} "
-                row.cells[6].text = f" {grand_ctns:,.0f} "
+                row.cells[6].text = f" {grand_ctns_contract:,.0f} "
                 row.cells[8].text = f" $ {grand_amt:,.2f} "
                 
             elif "SAY IN WORD:" in col0:
@@ -778,33 +755,34 @@ def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchang
             elif col0.isdigit():
                 desc = row.cells[1].text
                 b = extract_brand(desc)
-                m = normalize_model(row.cells[3].text)
-                key = f"{b}_{m}"
+                brd_name = "TAKA PRO" if b == "TAKAPRO" else (b or "TAKA PRO")
+                m = row.cells[3].text.strip()
+                norm_m = normalize_model(m)
+                key_full = f"{brd_name}_{norm_m}"
                 
-                qty = model_data.get(key, {}).get("qty", 0)
-                ctns = model_data.get(key, {}).get("ctns", 0)
+                qty = dQty_brand.get(key_full, dQty_model.get(norm_m, 0))
+                pcs = dPCS_brand.get(key_full, dPCS_model.get(norm_m, 0))
+                ctns = dCtns_brand.get(key_full, dCtns_model.get(norm_m, 0))
                 
                 if qty == 0:
                     rows_to_delete.append(row)
                 else:
-                    price = prices.get(key)
+                    price = prices.get(key_full, prices.get(norm_m))
                     if price is None:
                         price_str = row.cells[7].text
                         price = float(re.sub(r'[^\d.]', '', price_str))
-                    amt = qty * price
+                    amt = round(qty * price, 2)
                     
                     row.cells[4].text = f" {qty:,.0f} "
-                    if ctns > 0 and qty % ctns == 0:
-                        row.cells[5].text = f" {int(qty/ctns)} "
-                    else:
-                        row.cells[5].text = ""
+                    row.cells[5].text = f" {int(pcs) if float(pcs).is_integer() else pcs} "
                     row.cells[6].text = f" {ctns:,.0f} "
+                    row.cells[7].text = f" $ {price:,.2f} "
                     row.cells[8].text = f" $ {amt:,.2f} "
                     
                     accum_qty += qty
                     accum_ctns += ctns
                     grand_qty += qty
-                    grand_ctns += ctns
+                    grand_ctns_contract += ctns
                     grand_amt += amt
 
         for r in rows_to_delete:
@@ -934,11 +912,8 @@ else:
                                 None, None, float_to_currency_words, number_to_words
                             )
                         elif supplier == "Feilizhou":
-                            model_cartons, total_cartons = get_carton_allocations(df_pl_raw)
-                            pl_groups = get_pl_groups(df_pl_raw)
                             process_feilizhou(
-                                zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchange_rate,
-                                model_cartons, pl_groups
+                                zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchange_rate
                             )
                             
                     st.session_state["processed_zip"] = zip_buffer.getvalue()
