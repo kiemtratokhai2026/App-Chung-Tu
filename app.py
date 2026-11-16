@@ -501,9 +501,9 @@ def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchang
         ws_pl["K3"] = f"INVOICE NO.: {inv_no}"
         ws_pl["K4"] = f"DATE: {inv_date}"
         
-        ws_pl.delete_rows(11, ws_pl.max_row - 10)
+        ws_pl.delete_rows(12, ws_pl.max_row - 11)
         
-        ranges_to_remove = [rng for rng in ws_pl.merged_cells.ranges if rng.min_row >= 11]
+        ranges_to_remove = [rng for rng in ws_pl.merged_cells.ranges if rng.min_row >= 12]
         for rng in ranges_to_remove:
             ws_pl.merged_cells.remove(rng)
             
@@ -511,7 +511,7 @@ def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchang
         center_align = Alignment(horizontal="center", vertical="center")
         left_align = Alignment(horizontal="left", vertical="center")
         
-        row_idx = 11
+        row_idx = 12
         current_brand = None
         prev_cno = None
         
@@ -563,12 +563,12 @@ def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchang
             for c in range(1, 12):
                 cell = ws_pl.cell(row=row_idx, column=c)
                 cell.border = thin_border
-                cell.alignment = center_align
+                cell.alignment = left_align if c == 2 else center_align
                 
             prev_cno = g["cno"]
             row_idx += 1
 
-        start_merge_row = 11
+        start_merge_row = 12
         while start_merge_row <= row_idx - 1:
             val = ws_pl.cell(row=start_merge_row, column=1).value
             if val is None or str(val).startswith("RUBBER BELT"):
@@ -599,10 +599,11 @@ def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchang
         cell.alignment = center_align
         fill = PatternFill(start_color="C00000", end_color="C00000", fill_type="solid")
         
-        ws_pl.cell(row=row_idx, column=5).value = grand_qty_pl
+        last_item_row = row_idx - 1
+        ws_pl.cell(row=row_idx, column=5).value = f"=SUM(E12:E{last_item_row})"
         ws_pl.cell(row=row_idx, column=7).value = grand_ctns
-        ws_pl.cell(row=row_idx, column=10).value = round(grand_nw_pl, 0)
-        ws_pl.cell(row=row_idx, column=11).value = round(grand_gw_pl, 0)
+        ws_pl.cell(row=row_idx, column=10).value = f"=ROUND(SUM(J12:J{last_item_row}),0)"
+        ws_pl.cell(row=row_idx, column=11).value = f"=ROUND(SUM(K12:K{last_item_row}),0)"
         
         for c in range(1, 12):
             cell = ws_pl.cell(row=row_idx, column=c)
@@ -610,14 +611,21 @@ def process_feilizhou(zip_file, df_pl_raw, df_inv_raw, inv_no, inv_date, exchang
             cell.fill = fill
             cell.font = Font(bold=True, color="FFFFFF")
             
+        distinct_brands = []
+        for g in groups:
+            if g.get("brand") and g["brand"] not in distinct_brands:
+                distinct_brands.append(g["brand"])
+                
         row_idx += 2
         ws_pl.cell(row=row_idx, column=1).value = "SHIPPING MARKS:"
-        ws_pl.cell(row=row_idx, column=3).value = "TAKA PRO"
-        ws_pl.cell(row=row_idx+1, column=3).value = "TAKA"
-        ws_pl.cell(row=row_idx+3, column=1).value = f"TOTAL: {grand_qty_pl:,.0f} PCS / {grand_ctns} CARTONS"
-        ws_pl.cell(row=row_idx+4, column=1).value = f"G.W.: {round(grand_gw_pl, 3):,.3f} KGS"
-        ws_pl.cell(row=row_idx+5, column=1).value = f"N.W.: {round(grand_nw_pl, 3):,.3f} KGS"
-        ws_pl.cell(row=row_idx+6, column=1).value = "MEAS.: __________ CBM"
+        for b_idx, b_name in enumerate(distinct_brands):
+            ws_pl.cell(row=row_idx + b_idx, column=3).value = b_name
+            
+        summary_row = row_idx + len(distinct_brands) + 1
+        ws_pl.cell(row=summary_row, column=1).value = f"TOTAL: {grand_qty_pl:,.0f} PCS / {grand_ctns} CARTONS"
+        ws_pl.cell(row=summary_row + 1, column=1).value = f"G.W.: {round(grand_gw_pl, 3):,.3f} KGS"
+        ws_pl.cell(row=summary_row + 2, column=1).value = f"N.W.: {round(grand_nw_pl, 3):,.3f} KGS"
+        ws_pl.cell(row=summary_row + 3, column=1).value = "MEAS.: __________ CBM"
         
         pl_bytes = io.BytesIO()
         wb_pl.save(pl_bytes)
